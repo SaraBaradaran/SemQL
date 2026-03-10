@@ -2,7 +2,9 @@
 SpotBugs bug descriptions: NM_FIELD_NAMING_CONVENTION and CI_CONFUSED_INHERITANCE
 Names of fields that are not final should be in mixed case with a lowercase first letter and the first letters of subsequent words capitalized. 
 Names of final fields should be all uppercase with words separated by underscores.
-The class is declared to be final, but declares fields to be protected. Since the class is final, it cannot be derived from, and the use of protected is confusing. The access modifier for the field should be changed to private or public to represent the true use for the field.
+The class is declared to be final, but declares fields to be protected. 
+Since the class is final, it cannot be derived from, and the use of protected is confusing. 
+The access modifier for the field should be changed to private or public to represent the true use for the field.
 */
 
 /* Associated Query */
