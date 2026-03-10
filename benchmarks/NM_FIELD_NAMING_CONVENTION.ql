@@ -10,5 +10,8 @@ The class is declared to be final, but declares fields to be protected. Since th
 import java
 
 from Class c, Field f
-where f.getDeclaringType().fromSource() and ((c.isFinal() and f.getDeclaringType() = c and f.isProtected()) or (if f.isFinal() then (not f.getName().regexpMatch("^[A-Z_]+$") or not LLMQuery(f.getName(), "Name must be all uppercase with words separated by underscores")) else not LLMQuery(f.getName(), "Name must be in mixed case with a lowercase first letter and the first letters of subsequent words capitalized")))
+where f.getDeclaringType().fromSource() 
+      and ((c.isFinal() and f.getDeclaringType() = c and f.isProtected()) 
+      or (if f.isFinal() then (not f.getName().regexpMatch("^[A-Z_]+$") or not LLMQuery(f.getName(), "Name must be all uppercase with words separated by underscores")) 
+      else not LLMQuery(f.getName(), "Name must be in mixed case with a lowercase first letter and the first letters of subsequent words capitalized")))
 select f, "fields needing modification"
