@@ -14,6 +14,10 @@ import pandas as pd
 import json
 import time
 
+RED = "\033[31m"
+GREEN = "\033[32m"
+RESET = "\033[0m"
+
 class Oracle():
     def __init__(self):
         self.client = OpenAI()  # API key is read from environment
@@ -50,6 +54,7 @@ class Oracle():
             \nCondition: {condition}\
             \nCases: {','.join(str(t) for t in chunk)}\
             \nOutput format: Output all the cases that satisfy the condition. Each satisfying case must be printed on its own line. Do not include extra text or non-satisfying cases."
+            #print(prompt)
             ans += self.send_prompt(prompt)
         result = [x for x in ans if "```" not in x]  
         self.oracle_output_tokens += len(result)  
@@ -364,7 +369,7 @@ class SatFormula:
     
     def process_dnf_with_K(self, dnf_expr, K): 
         dnf_expr = to_dnf(dnf_expr, simplify=True, force=True)
-        print("Formula after simplification ->", dnf_expr)
+        print(f"[-] Simplified DNF: {dnf_expr}", file=sys.stderr)
         if isinstance(dnf_expr, Or):
             clauses = list(dnf_expr.args)
         else:
@@ -459,23 +464,22 @@ formula = qp.parse_where_condition(qp.where_root, vargen)
 sf = SatFormula(formula)
 llm = Oracle()
 
-print("#"* 20, "Original Query", "#"* 20)
-print(code.decode("utf8"))
-
-print("#"* 20, "SAT Formula", "#"* 20)
-print(formula)
+#print(f"[-] Original Query:", file=sys.stderr)
+#print(f"{code.decode('utf8')}", file=sys.stderr)
+print(f"[-] SAT Formula: {formula}", file=sys.stderr)
 
 new_formula = sf.push_nots()
 sf.set_new_formula(new_formula)
-
 select_items = qp.extract_select_items()
 variables_to_remove = []
+
 mapping = {}; args = {}; descs = {}; oracle_info = {}
 pattern = re.compile(r'LLMQuery\(\s*([^,]+)\s*,\s*"(.*)"\)')
-print("\nVariable Mapping")
+
+print(f"[-] Var Mapping:", file=sys.stderr)
 for v, n in vargen.map.items():
     text = code[n.start_byte:n.end_byte].decode("utf8")
-    print(f"{v} := {text}")
+    print(f"-------------| {RED}{v} := {text}{RESET}", file=sys.stderr)
     mapping[v] = text
     if "LLMQuery" in text: 
         variables_to_remove.append(v)
@@ -485,42 +489,34 @@ for v, n in vargen.map.items():
         descs[v] = m.group(2)
 
 base_args_objects = {}
-
 for k, v in args.items():
     base_args_objects[k] = v
 
 tree = ast.parse(new_formula, mode='eval').body
-
 new_sat = sf.ast_to_sympy(tree)
 dnf_expr = sf.sat_to_dnf(new_sat)
-print("#"* 20, "DNF formula", "#"* 20)
-print(dnf_expr)
+print(f"[-] DNF Formula: {dnf_expr}", file=sys.stderr)
 
 V = {sympify(v) for v in variables_to_remove}
 clauses_with_K, clauses_without_K, W, results = sf.process_dnf_with_K(dnf_expr, V)
-
-print("Int. queries ->", len(results))
-print("dnf clauses ->", len(clauses_with_K) + len(clauses_without_K))
+intermediate_queries = len(results)
+dnf_terms = len(clauses_with_K) + len(clauses_without_K)
 
 for i, elem in enumerate(results):
    v, c = elem
-   print(f"Evaluate {c} for variable {v}")
+   print(f"[-] Processing: {c}", file=sys.stderr)
+   print(f"[-] Oracle Atoms: {v}", file=sys.stderr)
    formula_symbols = set(c.free_symbols)
    new_formula = sf.sympy_to_and_or_not(c)
-   print(new_formula)
    tree = ast.parse(new_formula, mode='eval').body
    new_tree = tree
    for var in v:
        formula_symbols.remove(var)
-       print(f"Let's remove {var}")
        new_tree = sf.remove_var_ast(new_tree, str(var))
-       print(sf.ast_to_str(new_tree))
    new_formula_str = sf.ast_to_str(new_tree)
-   print("#"* 20, "New SAT Formula", "#"* 20)
-   print(new_formula_str)
+   print(f"[-] Evaluating: {new_formula_str}", file=sys.stderr)
 
    new_query = recover_query(new_formula_str, mapping)
-   print("New Query:")
    new_file = f"{query_file.split('.ql')[0]}_new_{i}.ql"
       
    known = formula_symbols & oracle_info.keys()
@@ -543,8 +539,10 @@ for i, elem in enumerate(results):
        if new_query != "": f.write(f'where {new_query}\n')
        s = ','.join(f'{args[str(var)]} as target_{str(var)}' for var in v)
        f.write(f'select {s}')
+
    cmd = f"codeql {group} {action} {new_file} " + " ".join(f"{option}" for option in rest if not option.startswith("--output=")) + " --output=tmp.bqrs"
-   print(cmd)
+   print(f"[-] Int. Query: {cmd}", file=sys.stderr)
+
    subprocess.run(["bash", "-lc", cmd], check=True, env=os.environ)
    cmd = f"codeql bqrs decode --output=tmp.csv --format=csv tmp.bqrs"   
    subprocess.run(["bash", "-lc", cmd], check=True, env=os.environ)
@@ -557,16 +555,10 @@ for i, elem in enumerate(results):
            oracle_info[var] = oracle_info[var] + ans_values
        else: oracle_info[var] = ans_values
 
-print("llm.oracle_output_tokens ->", llm.oracle_output_tokens)
-print("llm.oracle_input_tokens ->", llm.oracle_input_tokens)
-print("llm.oracle_calls ->", llm.oracle_calls)
-print("llm.oracle_chunk_calls ->", llm.oracle_chunk_calls)
-print("llm.oracle_time ->", f"{llm.oracle_time:.2f}")
-
 known = sympify(new_sat).free_symbols & oracle_info.keys()
-print("known ->", known)
 final_query = code.decode("utf8")
 new_file = f"{query_file.split('.ql')[0]}_final_optimized.ql"
+
 with open(new_file, "w") as f:
     if known:
         f.write('// required predicates must be defined here\n')
@@ -581,10 +573,21 @@ with open(new_file, "w") as f:
     f.write(final_query)
 
 cmd = f"codeql {group} {action} {new_file} " + " ".join(f"{option}" for option in rest if not option.startswith("--output=")) + " --output=tmp.bqrs"
-print(cmd)
+print(f"[-] Final Query: {cmd}", file=sys.stderr)
+
 subprocess.run(["bash", "-lc", cmd], check=True, env=os.environ)
 cmd = f"codeql bqrs decode --output=tmp.csv --format=csv tmp.bqrs"
+
 subprocess.run(["bash", "-lc", cmd], check=True, env=os.environ)
 df = pd.read_csv("tmp.csv")
-print("final_query_tuples ->", len(df))
-print("total_time ->", f"{time.time() - start_time:.2f}")
+
+print(f"{GREEN}[+] Int. Queries: {intermediate_queries}{RESET}")
+print(f"{GREEN}[+] DNF Terms: {dnf_terms}{RESET}")
+print(f"{GREEN}[+] Output Tokens: {llm.oracle_output_tokens}{RESET}")
+print(f"{GREEN}[+] Input Tokens: {llm.oracle_input_tokens}{RESET}")
+print(f"{GREEN}[+] Oracle Calls: {llm.oracle_calls}{RESET}")
+print(f"{GREEN}[+] Oracle Chunk Calls: {llm.oracle_chunk_calls}{RESET}")
+print(f"{GREEN}[+] Oracle Time: {llm.oracle_time:.2f}{RESET}")
+print(f"{GREEN}[+] Output Tuples: {len(df)}{RESET}")
+print(f"{GREEN}[+] Total Time: {time.time() - start_time:.2f}{RESET}")
+print(f"See tmp.csv file for the result of SemQL query {sys.argv[3]}")
