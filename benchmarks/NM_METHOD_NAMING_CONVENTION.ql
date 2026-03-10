@@ -20,5 +20,8 @@ This promotes code readability and reduces the chances of conflicts.
 import java
 
 from Method m
-where m.getDeclaringType().fromSource() and (m.getName().regexpMatch(".*_.*") or not LLMQuery(m.getName(), "Name must start with verbs, in mixed case with the first letter lowercase, with the first letter of each internal word capitalized") or LLMQuery(m.getName(), "Name must be among public identifiers from the Java Standard Library, for example <File>, but must not be among method names such as <equals>"))
+where m.getDeclaringType().fromSource() 
+      and (m.getName().regexpMatch(".*_.*") 
+      or not LLMQuery(m.getName(), "Name must start with verbs, in mixed case with the first letter lowercase, with the first letter of each internal word capitalized") 
+      or LLMQuery(m.getName(), "Name must be among public identifiers from the Java Standard Library, for example <File>, but must not be among method names such as <equals>"))
 select m.getName(), "methods needing modification"
