@@ -9,7 +9,7 @@ export PATH=$PATH:/path/to/codeql
 codeql resolve qlpacks
 ```
 
-to run the benchmakrs on the SpotBugs code base, you simply need to do the following steps
+To run the benchmakrs on the SpotBugs code base, you simply need to do the following steps
 #### Clone the Codebase
 ```
 git clone https://github.com/spotbugs/spotbugs
