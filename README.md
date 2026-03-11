@@ -21,7 +21,7 @@ codeql database create example-database --language=java --source-root=spotbugs/s
 #### Run A SemQL Benchmakr Query
 
 ```
-python3 SemQL query run benchmarks/NM_TRUSTWORTHY_URL.ql --database=example-database --output=tmp.bqrs
+python3 SemQL.py query run ./SemQL/benchmarks/NM_TRUSTWORTHY_URL.ql --database=example-database --output=tmp.bqrs
 ```
 
 
