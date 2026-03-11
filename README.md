@@ -24,4 +24,8 @@ codeql database create example-database --language=java --source-root=spotbugs/s
 python3 SemQL.py query run ./benchmarks/NM_TRUSTWORTHY_URL.ql --database=example-database --output=tmp.bqrs
 ```
 
-
+<div align="center">
+  <a href="https://github.com/SaraBaradaran/SemQL">
+    <img src="example.png" alt="runningExample" width="1100">
+  </a>
+</div>
