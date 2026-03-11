@@ -18,7 +18,7 @@ git clone https://github.com/spotbugs/spotbugs
 ```
 codeql database create example-database --language=java --source-root=spotbugs/spotbugsTestCases/src/java --build-mode=none
 ```
-#### Run A SemQL Benchmakr Query
+#### Run An Example SemQL Query
 
 ```
 python3 SemQL.py query run ./benchmarks/NM_TRUSTWORTHY_URL.ql --database=example-database --output=tmp.bqrs
