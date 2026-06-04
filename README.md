@@ -1,4 +1,9 @@
-# SemQL
+<div align="center">
+  <a href="https://github.com/SaraBaradaran/SemQL">
+    <img src="SemQL.png" alt="runningExample" width="300">
+  </a>
+</div>
+
 An extension of CodeQL language
 
 ## Download and Install CodeQL
