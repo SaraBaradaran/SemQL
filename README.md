@@ -1,4 +1,4 @@
-<div align="center">
+<div align="left">
   <a href="https://github.com/SaraBaradaran/SemQL">
     <img src="SemQL.png" alt="runningExample" width="300">
   </a>
