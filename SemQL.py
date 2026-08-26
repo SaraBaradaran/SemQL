@@ -527,8 +527,8 @@ for i, elem in enumerate(results):
            f.write('// required predicates must be defined here\n')
            for var in known:
                if var == v: exit(0)
+               satisfying_elements = ",".join(json.dumps(elem, ensure_ascii=False) for elem in oracle_info[var])
                if satisfying_elements != "":
-                   satisfying_elements = ",".join(json.dumps(elem, ensure_ascii=False) for elem in oracle_info[var])
                    f.write(f'predicate target_predicate_{str(var)}(string arg)')
                    f.write('{'); f.write(f'arg in [{satisfying_elements}]'); f.write('}\n')
                    new_query = new_query.replace(mapping[str(var)], f'target_predicate_{str(var)}({base_args_objects[str(var)]})')
