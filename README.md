@@ -5,6 +5,8 @@
 </div>
 <!-- An extension of CodeQL language -->
 
+For more information, see our SOAP 2026 paper ["LLM-Integrated Declarative Program Analysis"](https://doi.org/10.1145/3814987.3814993).
+
 ## Download and Install CodeQL
 ```
 wget https://github.com/github/codeql-action/releases/download/codeql-bundle-v2.17.0/codeql-bundle-linux64.tar.gz
