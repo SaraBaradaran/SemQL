@@ -8,18 +8,18 @@
 For more information, see our SOAP 2026 paper ["LLM-Integrated Declarative Program Analysis"](https://doi.org/10.1145/3814987.3814993).
 If you use this tool in your research, please cite our paper as follows:
 ```
-@inproceedings{10.1145/3814987.3814993,
-author = {Baradaran, Sara and Nazari, Amirmohammad and Raghothaman, Mukund},
-title = {LLM-Integrated Declarative Program Analysis},
-year = {2026},
-isbn = {9798400727092},
-publisher = {Association for Computing Machinery},
-doi = {10.1145/3814987.3814993},
-booktitle = {Proceedings of the 15th ACM SIGPLAN International Workshop on the State Of the Art in Program Analysis},
-pages = {41–47},
-numpages = {7},
-location = {Boulder, CO, USA},
-series = {SOAP '26}
+@INPROCEEDINGS{10.1145/3814987.3814993,
+  author = {Baradaran, Sara and Nazari, Amirmohammad and Raghothaman, Mukund},
+  title = {LLM-Integrated Declarative Program Analysis},
+  year = {2026},
+  isbn = {9798400727092},
+  publisher = {Association for Computing Machinery},
+  doi = {10.1145/3814987.3814993},
+  booktitle = {Proceedings of the 15th ACM SIGPLAN International Workshop on the State Of the Art in Program Analysis},
+  pages = {41–47},
+  numpages = {7},
+  location = {Boulder, CO, USA},
+  series = {SOAP '26}
 }
 ```
 
