@@ -13,7 +13,11 @@ from openai import OpenAI
 import pandas as pd
 import json
 import time
+import argparse
 
+
+interm = "/home/sara/java_corpus/queries/interm-q"
+final = "/home/sara/java_corpus/queries/final-q"
 RED = "\033[31m"
 GREEN = "\033[32m"
 RESET = "\033[0m"
@@ -24,41 +28,64 @@ class Oracle():
         self.oracle_calls = 0
         self.oracle_input_tokens = 0
         self.oracle_output_tokens = 0
-        self.oracle_chunk_calls = 0
         self.oracle_time = 0
+        self.cach = {}
 
     def send_prompt(self, prompt):
         response = self.client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-5.6-sol",#"gpt-4o-mini",
             messages=[
               {"role": "user", "content": prompt}
             ],
         )
         answer = response.choices[0].message.content
-        target_cases = answer.split("\n")
-        target_cases = [x.strip() for x in target_cases]
-        return target_cases
+        self.oracle_input_tokens += response.usage.prompt_tokens
+        self.oracle_output_tokens += response.usage.completion_tokens
+        #answer = "YES"
+        print("-" * 50)
+        print(prompt)
+        print(answer)
+        return answer
 
-    def chunk_list(self, lst, size=100):
-        return [lst[i:i+size] for i in range(0, len(lst), size)]
+    def submit_oracle_queries(self, elements, oracle_var):
+        start_time = time.time()
+        result = []
 
-    def submit_oracle_queries(self, condition, elements):
-        start = time.time()
-        chunks = self.chunk_list(elements, 100)
-        self.oracle_input_tokens += len(elements)
-        ans = []
-        self.oracle_calls += 1
-        for chunk in chunks:
-            self.oracle_chunk_calls += 1
-            prompt = f"Task description: Identify if each given case satisfies the following condition: \
-            \nCondition: {condition}\
-            \nCases: {','.join(str(t) for t in chunk)}\
-            \nOutput format: Output all the cases that satisfy the condition. Each satisfying case must be printed on its own line. Do not include extra text or non-satisfying cases."
-            #print(prompt)
-            ans += self.send_prompt(prompt)
-        result = [x for x in ans if "```" not in x]  
-        self.oracle_output_tokens += len(result)  
-        self.oracle_time += (time.time() - start)
+        for elem in elements:
+            code = " ".join(
+                extract_code_from_location(block) if i in source_indices[str(oracle_var)] else block
+                for i, block in enumerate(elem.split("::"))
+            )
+
+            #code = " ".join(
+            #    extract_code_from_location(block) 
+            #    if i in source_indices[str(oracle_var)] and os.path.exists(block.split(":")[0]) 
+            #    else block
+            #    for i, block in enumerate(elem.split("::"))
+            #)
+
+            if f"{code}" in self.cach:
+                #print(self.cach)
+                if self.cach[f"{code}"]:
+                   result.append(elem)
+                continue
+            
+            prompt = (
+                f"{code}\n"
+                "Output YES only if the above proposition holds and "
+                "NO otherwise. Do not include extra text in your answer."
+            )
+
+            self.oracle_calls += 1
+
+            answer = self.send_prompt(prompt)
+
+            if answer.strip() == "YES":
+                self.cach[f"{code}"] = True
+                result.append(elem)
+            else: self.cach[f"{code}"] = False
+            
+        self.oracle_time += time.time() - start_time
         return result
 
 class Transforemr(ast.NodeTransformer):
@@ -100,362 +127,749 @@ class Transforemr(ast.NodeTransformer):
 
 class QueryParser:
     def __init__(self, code):
+        self.code = code
         self.tree = parser.parse(code)
         self.root = self.tree.root_node
-        self.code = code
-        self.walk(self.root)
 
-    def extract_types_from_from_root(self, from_node):
-        var_types = {}
-        parent = from_node.parent
-        siblings = parent.children
-        idx = siblings.index(from_node)
+        self.where_root = None
+        self.where_clause = None
+        self.select_root = None
+        self.select_clause = None
+        self.from_root = None
+        self.from_clause = None
+        self.var_types = {}
 
-        for node in siblings[idx + 1:]:
-            if self.node_text(node) == "where": 
-                break
-            if node.type != "varDecl":
-                continue
-            type_node = None
-            name_node = None
-    
-            for c in node.children:
-                if c.type == "typeExpr":
-                    type_node = c
-                elif c.type == "varName":
-                    # simpleId holds the actual identifier
-                    for v in c.children:
-                        if v.type == "simpleId":
-                            name_node = v
-    
-            if type_node and name_node:
-                type_name = code[type_node.start_byte:type_node.end_byte].decode("utf8")
-                var_name = code[name_node.start_byte:name_node.end_byte].decode("utf8")
-                var_types[var_name] = type_name
-     
-        return var_types
-     
-    def walk(self, node):
-        if node.type == "where":
-            self.where_root = self.get_full_clause(node, part="where")
-            self.where_clause = self.code[node.start_byte:self.where_root.end_byte]
-        if node.type == "select":
-            self.select_root = self.get_full_clause(node, part="select")
-            self.select_clause = self.code[node.start_byte:self.select_root.end_byte]
-        if node.type == "from":
-            self.from_root = self.get_full_from_clause(node, part="from")
-            self.from_clause = self.code[node.start_byte:self.from_root.end_byte]
-            self.var_types = self.extract_types_from_from_root(node)
-        for c in node.children: 
-            self.walk(c)
+        self._extract_query_parts()
 
-    def get_full_clause(self, node, part):
-        if node.type != part:
-            return None
-        parent = node.parent
-        if not parent:
-            return None
-        siblings = parent.children
-        idx = siblings.index(node)
-        for sib in siblings[idx + 1:]:
-            if sib.is_named:
-                return sib
-        return node
-
-    def get_full_from_clause(self, node, part):
-        if node.type != part:
-            return None
-        parent = node.parent
-        if not parent:
-            return None
-        siblings = parent.children
-        idx = siblings.index(node)
-        last_sib = siblings[idx + 1]
-        for sib in siblings[idx + 1:]:
-            if self.node_text(sib) == "where":
-                return last_sib
-            last_sib = sib
-        return node
+    # ------------------------------------------------------------------
+    # Basic helpers
+    # ------------------------------------------------------------------
 
     def node_text(self, node):
-        return self.code[node.start_byte:node.end_byte].decode()
+        return self.code[node.start_byte:node.end_byte].decode("utf-8")
+
+    def children_after(self, node):
+        """Return the siblings appearing after node."""
+        parent = node.parent
+        if parent is None:
+            return []
+
+        siblings = parent.children
+        return siblings[siblings.index(node) + 1:]
+
+    # ------------------------------------------------------------------
+    # Query structure extraction
+    # ------------------------------------------------------------------
+
+    def _extract_query_parts(self):
+        """Extract the FROM, WHERE, and SELECT parts of the query."""
+        self._walk(self.root)
+
+    def _walk(self, node):
+        if node.type == "where":
+            self.where_root = self._get_full_clause(node)
+            self.where_clause = self.code[
+                node.start_byte:self.where_root.end_byte
+            ]
+
+        elif node.type == "select":
+            self.select_root = self._get_full_clause(node)
+            self.select_clause = self.code[
+                node.start_byte:self.select_root.end_byte
+            ]
+
+        elif node.type == "from":
+            self.from_root = self._get_full_from_clause(node)
+            self.from_clause = self.code[
+                node.start_byte:self.from_root.end_byte
+            ]
+            self.var_types = self._extract_var_types(node)
+
+        for child in node.children:
+            self._walk(child)
+
+    def _get_full_clause(self, node):
+        """Return the complete clause associated with a WHERE or SELECT."""
+        for sibling in self.children_after(node):
+            if sibling.is_named:
+                return sibling
+
+        return node
+
+    def _get_full_from_clause(self, node):
+        """Return the complete FROM clause, stopping before WHERE."""
+        siblings = self.children_after(node)
+
+        if not siblings:
+            return node
+
+        last_sibling = siblings[0]
+
+        for sibling in siblings:
+            if self.node_text(sibling) == "where":
+                return last_sibling
+
+            last_sibling = sibling
+
+        return last_sibling
+
+    def _extract_var_types(self, from_node):
+        """Extract variable names and their declared types from FROM."""
+        var_types = {}
+
+        for node in self.children_after(from_node):
+            if self.node_text(node) == "where":
+                break
+
+            if node.type != "varDecl":
+                continue
+
+            type_node = node.child_by_field_name("type")
+            name_node = node.child_by_field_name("name")
+
+            if type_node is None or name_node is None:
+                continue
+
+            var_types[
+                self.node_text(name_node)
+            ] = self.node_text(type_node)
+
+        return var_types
+
+    # ------------------------------------------------------------------
+    # WHERE-condition parsing
+    # ------------------------------------------------------------------
 
     def parse_where_condition(self, node, vargen):
-        t = node.type
-        if t == "comp_term":
+        """Convert a CodeQL WHERE expression into a Boolean formula."""
+        if node is None:
+            return None
+
+        node_type = node.type
+
+        if node_type in {
+            "quantified",
+            "comp_term",
+            "call_or_unqual_agg_expr",
+            "aritylessPredicateExpr",
+            "qualified_expr",
+            "instance_of",
+            "in_expr",
+        }:
             return vargen.fresh(node)
 
-        if t == "conjunction":
-            left = node.child_by_field_name("left")
-            right = node.child_by_field_name("right")
-            l = self.parse_where_condition(left, vargen)
-            r = self.parse_where_condition(right, vargen)
-            return f"({l} and {r})"
+        if node_type in {"conjunction", "disjunction", "implication"}:
+            operator = {
+                "conjunction": "and",
+                "disjunction": "or",
+                "implication": ">>",
+            }[node_type]
 
-        if t == "disjunction":
-            left = node.child_by_field_name("left")
-            right = node.child_by_field_name("right")
-            l = self.parse_where_condition(left, vargen)
-            r = self.parse_where_condition(right, vargen)
-            return f"({l} or {r})"
+            left = self.parse_where_condition(
+                node.child_by_field_name("left"),
+                vargen,
+            )
+            right = self.parse_where_condition(
+                node.child_by_field_name("right"),
+                vargen,
+            )
 
-        if t == "implication":
-            left = node.child_by_field_name("left")
-            right = node.child_by_field_name("right")
-            l = self.parse_where_condition(left, vargen)
-            r = self.parse_where_condition(right, vargen)
-            return f"({l} >> {r})"
+            return f"({left} {operator} {right})"
 
-        if t == "if_term":
-            cond = node.child_by_field_name("cond")
-            then_branch = node.child_by_field_name("first")
-            else_branch = node.child_by_field_name("second")
-            c = self.parse_where_condition(cond, vargen)
-            y = self.parse_where_condition(then_branch, vargen)
-            z = self.parse_where_condition(else_branch, vargen)
-            return f"(({c} and {y}) or (not {c} and {z}))"
+        if node_type == "if_term":
+            condition = self.parse_where_condition(
+                node.child_by_field_name("cond"),
+                vargen,
+            )
+            then_branch = self.parse_where_condition(
+                node.child_by_field_name("first"),
+                vargen,
+            )
+            else_branch = self.parse_where_condition(
+                node.child_by_field_name("second"),
+                vargen,
+            )
 
-        if t == "negation":
+            return (
+                f"(({condition} and {then_branch}) "
+                f"or (not {condition} and {else_branch}))"
+            )
+
+        if node_type == "negation":
             child = node.named_children[0]
             inner = self.parse_where_condition(child, vargen)
             return f"not {inner}"
 
-        if t == "par_expr":
+        if node_type == "par_expr":
             child = node.named_children[0]
             return f"({self.parse_where_condition(child, vargen)})"
 
-        if t in { "call_or_unqual_agg_expr", "aritylessPredicateExpr"
-            "comp_term", "qualified_expr", "instance_of", "in_expr" }:
-            return vargen.fresh(node)
+        for child in node.named_children:
+            result = self.parse_where_condition(child, vargen)
+            if result is not None:
+                return result
 
-        for c in node.named_children:
-            result = self.parse_where_condition(c, vargen)
-            if result: return result
         return None
 
+    # ------------------------------------------------------------------
+    # SELECT extraction
+    # ------------------------------------------------------------------
+
     def extract_select_items(self):
+        """Extract individual expressions from the SELECT clause."""
         items = []
+
         for child in self.select_root.children:
             for item in child.children:
-                if not item.is_named:
-                    continue
-                text = self.code[item.start_byte:item.end_byte].decode("utf8")
-                items.append(text)
+                if item.is_named:
+                    items.append(self.node_text(item))
+
         return items
 
 class SatFormula:
     def __init__(self, formula):
         self.formula = formula
 
-    def push_nots(self):
-        tree = ast.parse(self.formula, mode="eval")
-        new_tree = Transforemr().visit(tree)
-        ast.fix_missing_locations(new_tree)
-        return ast.unparse(new_tree)
+    # ------------------------------------------------------------------
+    # Formula normalization
+    # ------------------------------------------------------------------
 
-    def set_new_formula(self, new_formula):
-        self.formula = new_formula
+    def push_nots(self):
+        """Push negations inward using the Boolean formula transformer."""
+        tree = ast.parse(self.formula, mode="eval")
+        tree = Transforemr().visit(tree)
+        ast.fix_missing_locations(tree)
+        return ast.unparse(tree)
+
+    def set_formula(self, formula):
+        """Update the stored formula."""
+        self.formula = formula
+
+    # ------------------------------------------------------------------
+    # AST transformations
+    # ------------------------------------------------------------------
 
     def remove_var_ast(self, node, var):
+        """
+        Remove all occurrences of `var` from a Boolean AST.
+
+        For example:
+            A and var and B  ->  A and B
+            A and not var    ->  A
+        """
         if isinstance(node, ast.Name):
             return None if node.id == var else node
-        elif isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-            new_operand = self.remove_var_ast(node.operand, var)
-            return ast.UnaryOp(op=ast.Not(), operand=new_operand) if new_operand else None
-        elif isinstance(node, ast.BoolOp):
-            new_values = []
-            for v in node.values:
-                nv = self.remove_var_ast(v, var)
-                if nv:
-                    new_values.append(nv)
-            if not new_values:
-                return None
-            elif len(new_values) == 1:
-                return new_values[0]
-            else:
-                return ast.BoolOp(op=node.op, values=new_values)
-        else: return node
 
-    # Recursively remove a variable from an AST node
-    def replace_var_ast(self, node, var):
-        if isinstance(node, ast.Name):
-            return ast.Constant(value=True) if node.id == var else node
-        elif isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-            new_operand = self.replace_var_ast(node.operand, var)
-            if not(isinstance(new_operand, ast.Constant) and new_operand.value is True):
-                return ast.UnaryOp(op=ast.Not(), operand=new_operand)
-            else:
-                return ast.Constant(value=True)
-        elif isinstance(node, ast.BoolOp):
-            new_values = []
-            for v in node.values:
-                nv = self.replace_var_ast(v, var)
-                new_values.append(nv)
-            if not new_values:
-                return ast.Constant(value=True)
-            elif len(new_values) == 1:
-                return new_values[0]
-            else:
-                return ast.BoolOp(op=node.op, values=new_values)
-        else: return node
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            operand = self.remove_var_ast(node.operand, var)
+            return self._make_not(operand)
 
-    # Convert AST back to string
+        if isinstance(node, ast.BoolOp):
+            values = [
+                value
+                for child in node.values
+                if (value := self.remove_var_ast(child, var)) is not None
+            ]
+            return self._make_bool_op(node.op, values)
+
+        return node
+
+    # ------------------------------------------------------------------
+    # AST helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_true(node):
+        return isinstance(node, ast.Constant) and node.value is True
+
+    @staticmethod
+    def _make_not(node):
+        if node is None:
+            return None
+
+        return ast.UnaryOp(
+            op=ast.Not(),
+            operand=node,
+        )
+
+    @staticmethod
+    def _make_bool_op(op, values, empty_value=None):
+        if not values:
+            return (
+                ast.Constant(value=empty_value)
+                if empty_value is not None
+                else None
+            )
+
+        if len(values) == 1:
+            return values[0]
+
+        return ast.BoolOp(
+            op=op,
+            values=values,
+        )
+
+    # ------------------------------------------------------------------
+    # AST -> string
+    # ------------------------------------------------------------------
+
     def ast_to_str(self, node):
+        """Convert a Boolean AST into a CodeQL-compatible expression."""
         if node is None:
             return ""
+
         if isinstance(node, ast.Name):
             return node.id
-        elif isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
             return f"not {self.ast_to_str(node.operand)}"
-        elif isinstance(node, ast.BoolOp):
-            op_str = ' and ' if isinstance(node.op, ast.And) else ' or '
-            return '(' + op_str.join(self.ast_to_str(v) for v in node.values) + ')'
-        elif isinstance(node, ast.Constant):
-            if node.value is True: return '(1 = 1)'
-        else: return str(node)
+
+        if isinstance(node, ast.BoolOp):
+            operator = self._bool_operator(node.op)
+            values = [self.ast_to_str(value) for value in node.values]
+            return f"({operator.join(values)})"
+
+        if self._is_true(node):
+            return "(1 = 1)"
+
+        return str(node)
+
+    @staticmethod
+    def _bool_operator(op):
+        if isinstance(op, ast.And):
+            return " and "
+        if isinstance(op, ast.Or):
+            return " or "
+        raise ValueError(f"Unsupported Boolean operator: {type(op)}")
+
+    # ------------------------------------------------------------------
+    # AST -> SymPy expression
+    # ------------------------------------------------------------------
 
     def ast_to_sympy(self, node):
+        """Convert a Boolean AST into a SymPy-compatible expression."""
         if node is None:
             return ""
+
         if isinstance(node, ast.Name):
             return node.id
-        elif isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-            return f"(~ {self.ast_to_sympy(node.operand)})"
-        elif isinstance(node, ast.BoolOp):
-            op_str = ' & ' if isinstance(node.op, ast.And) else ' | '
-            return '(' + op_str.join(self.ast_to_sympy(v) for v in node.values) + ')'
-        elif isinstance(node, ast.Constant):
+
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            return f"(~{self.ast_to_sympy(node.operand)})"
+
+        if isinstance(node, ast.BoolOp):
+            operator = self._sympy_operator(node.op)
+            values = [
+                self.ast_to_sympy(value)
+                for value in node.values
+            ]
+            return f"({operator.join(values)})"
+
+        if isinstance(node, ast.Constant):
             return repr(node.value)
-        else: return str(node)
 
+        return str(node)
 
-    def sat_to_dnf(self, formula):
-        expr = sympify(formula)
-        return to_dnf(expr, simplify=False)
+    @staticmethod
+    def _sympy_operator(op):
+        if isinstance(op, ast.And):
+            return " & "
+        if isinstance(op, ast.Or):
+            return " | "
+        raise ValueError(f"Unsupported Boolean operator: {type(op)}")
+
+    # ------------------------------------------------------------------
+    # SymPy / DNF
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def sat_to_dnf(formula):
+        """Convert a Boolean expression into DNF."""
+        return to_dnf(sympify(formula), simplify=False)
 
     def sympy_to_and_or_not(self, expr):
+        """Convert a SymPy Boolean expression into Python-style syntax."""
         if isinstance(expr, Symbol):
             return expr.name
-    
+
         if isinstance(expr, Not):
             return f"not ({self.sympy_to_and_or_not(expr.args[0])})"
-    
+
         if isinstance(expr, And):
             return " and ".join(
-                f"({self.sympy_to_and_or_not(arg)})" for arg in expr.args
+                f"({self.sympy_to_and_or_not(arg)})"
+                for arg in expr.args
             )
-    
+
         if isinstance(expr, Or):
             return " or ".join(
-                f"({self.sympy_to_and_or_not(arg)})" for arg in expr.args
+                f"({self.sympy_to_and_or_not(arg)})"
+                for arg in expr.args
             )
 
+        return str(expr)
 
-    def clause_contains_term_from_K(self, clause, K):
-        if isinstance(clause, And):
-            literals = clause.args
-        else:
-            literals = [clause]
+    # ------------------------------------------------------------------
+    # DNF clause analysis
+    # ------------------------------------------------------------------
 
-        found  = set()
-        for lit in literals:
-            if isinstance(lit, Symbol) and lit in K:
-                found.add(lit)
-            if isinstance(lit, Not) and lit.args[0] in K:
-                found.add(lit.args[0])   
- 
+    @staticmethod
+    def clause_contains_term_from_K(clause, K):
+        """
+        Return the variables from K that occur in a DNF clause,
+        regardless of whether they occur positively or negatively.
+        """
+        literals = clause.args if isinstance(clause, And) else (clause,)
+
+        found = set()
+
+        for literal in literals:
+            if isinstance(literal, Symbol) and literal in K:
+                found.add(literal)
+
+            elif isinstance(literal, Not) and literal.args[0] in K:
+                found.add(literal.args[0])
+
         return found
- 
-    
-    def process_dnf_with_K(self, dnf_expr, K): 
-        dnf_expr = to_dnf(dnf_expr, simplify=True, force=True)
-        print(f"[-] Simplified DNF: {dnf_expr}", file=sys.stderr)
-        if isinstance(dnf_expr, Or):
-            clauses = list(dnf_expr.args)
-        else:
-            clauses = [dnf_expr]
-    
-        clauses_with_K = []
-        clauses_without_K = []
-    
-        for clause in clauses:
-            Kc = self.clause_contains_term_from_K(clause, K)
-            if len(Kc):
-                clauses_with_K.append((clause, Kc))
-            else:
-                clauses_without_K.append(clause)
-    
-        if clauses_without_K:
-            W = And(*clauses_without_K)
-        else:
-            W = false  # edge case
-    
-        results = []
-        clauses_with_K_sorted = sorted( clauses_with_K,
-           key=lambda t: len(set(t[0].free_symbols) & K)
+
+    @staticmethod
+    def remove_llm_literals(clause, atoms):
+        """Return a DNF conjunction with the selected LLM literals removed.
+
+        Algorithm 1 defines F_i[V_i] as the conjunction of *visited*
+        LLMQuery literals.  For an unvisited negative literal ``not q``,
+        substituting ``q = true`` would incorrectly produce ``false``;
+        the literal itself must be omitted instead.
+        """
+        literals = clause.args if isinstance(clause, And) else (clause,)
+        retained = []
+
+        for literal in literals:
+            atom = literal.args[0] if isinstance(literal, Not) else literal
+            if atom not in atoms:
+                retained.append(literal)
+
+        return And(*retained) if retained else true
+
+    def process_dnf_with_K(self, dnf_expr, K):
+
+        # Normalize to simplified DNF.
+        dnf_expr = to_dnf(
+            dnf_expr,
+            simplify=True,
+            force=True,
         )
-        X = [c[0] for c in clauses_with_K_sorted]
-        for i, Ci in enumerate(clauses_with_K_sorted):
-            Ci, Kc = Ci
-            if X[:i]:
-                Q = And(*(X[:i]))
-            else: Q = false
-            P = And(Ci, Not(W))
-            results.append((Kc, And(P, Not(Q))))
 
-        return clauses_with_K, clauses_without_K, W, results
+        print(
+            f"[-] Simplified DNF: {dnf_expr}",
+            file=sys.stderr,
+        )
 
-def rewrite_query(code, ranges):
-    new_code = code
-    for start, end in sorted(ranges, reverse=True):
-        new_code = new_code[:start] + new_code[end:]
-    return new_code
+        # Extract individual DNF clauses.
+        clauses = (
+            list(dnf_expr.args)
+            if isinstance(dnf_expr, Or)
+            else [dnf_expr]
+        )
 
-def recover_query(formula, mapping):
-    result = formula
-    for var, expr in mapping.items():
-        result = re.sub(rf'\b{var}\b', f'({expr})', result)
-    return result
+        annotated_clauses = [
+            (clause, self.clause_contains_term_from_K(clause, K))
+            for clause in clauses
+        ]
+
+        # Algorithm 1 processes *all* DNF terms in increasing order of
+        # their number of LLMQuery literals.  In particular, the zero-atom
+        # terms precede every term that requires materialization.
+        annotated_clauses.sort(key=lambda item: len(item[1]))
+        return annotated_clauses
+
 
 class BoolVarGen:
     def __init__(self):
-        self.i = 0
-        self.map = {}
+        self.counter = 0
+        self.mapping = {}
         self.cache = {}
 
-    def freshX(self, node):
-        self.i += 1
-        name = f"p{self.i}"
-        self.map[name] = node
-        return name
-
     def fresh(self, node):
-        key = node.text.decode("utf8")
+        """Return a Boolean variable corresponding to a syntax-tree node."""
+        key = node.text.decode("utf-8")
+
         if key in self.cache:
             return self.cache[key]
 
-        self.i += 1
-        name = f"p{self.i}"
-        self.map[name] = node
-        self.cache[key] = name
-        return name
+        self.counter += 1
+        variable = f"p{self.counter}"
+
+        self.mapping[variable] = node
+        self.cache[key] = variable
+
+        return variable
+
+def rewrite_query(code, ranges):
+    """Remove the specified byte ranges from the query."""
+    for start, end in sorted(ranges, reverse=True):
+        code = code[:start] + code[end:]
+    return code
+
+
+def recover_query(formula, mapping):
+    """Replace Boolean variables with their original expressions."""
+    for var, expression in mapping.items():
+        formula = re.sub(
+            rf"\b{re.escape(var)}\b",
+            f"({expression})",
+            formula,
+        )
+    return formula
+
+
+def extract_code_from_location(location: str) -> str:
+    """
+    Extract the source code corresponding to a CodeQL Location.
+
+    Expected format:
+        file:///path/to/File.java:start_line:start_col:end_line:end_col
+
+    Line numbers are 1-based.
+    Column numbers are assumed to be 1-based character positions.
+    """
+    print(location)
+    match = re.match(
+        r"^file://(.+):(\d+):(\d+):(\d+):(\d+)$",location
+    )
+
+    if not match:
+        raise ValueError(f"Invalid CodeQL location: {location}")
+
+    file_uri, start_line, start_col, end_line, end_col = match.groups()
+    
+    file_path = file_uri
+    start_line = int(start_line)
+    start_col = int(start_col)
+    end_line = int(end_line)
+    end_col = int(end_col)
+
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        return ""  # Ignored if file doesn't exist
+
+
+    if not (1 <= start_line <= len(lines)):
+        raise ValueError(f"Invalid start line: {start_line}")
+
+    if not (1 <= end_line <= len(lines)):
+        raise ValueError(f"Invalid end line: {end_line}")
+
+    start_line -= 1; end_line -= 1
+    start_col -= 1;
+
+    if start_line == end_line:
+        return lines[start_line][start_col:end_col]
+
+    return "".join([
+        lines[start_line][start_col:],
+        *lines[start_line + 1:end_line],
+        lines[end_line][:end_col]
+    ])
 
 
 def read_query_file(path):
     with open(path, "rb") as f:
         return f.read()
 
+def parse_llmquery(text):
+    """
+    Parse an LLMQuery call into its arguments.
+
+    Example:
+        LLMQuery(a, b, foo(x, y), "question, here")
+
+    Returns:
+        ["a", "b", "foo(x, y)", '"question, here"']
+
+    Each argument may be either a string literal or an arbitrary expression.
+    """
+
+    text = text.strip()
+
+    if not text.startswith("LLMQuery(") or not text.endswith(")"):
+        raise ValueError(f"Invalid LLMQuery expression: {text}")
+
+    body = text[len("LLMQuery("):-1]
+
+    args = []
+    current = []
+
+    depth = 0
+    in_string = False
+    escape = False
+
+    for ch in body:
+        # Inside a string literal
+        if in_string:
+            current.append(ch)
+
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+
+            continue
+
+        # Start of a string literal
+        if ch == '"':
+            in_string = True
+            current.append(ch)
+
+        # Opening bracket
+        elif ch in "([{":
+            depth += 1
+            current.append(ch)
+
+        # Closing bracket
+        elif ch in ")]}":
+            depth -= 1
+
+            if depth < 0:
+                raise ValueError(f"Unbalanced brackets in: {text}")
+
+            current.append(ch)
+
+        # Top-level argument separator
+        elif ch == "," and depth == 0:
+            arg = "".join(current).strip()
+
+            if not arg:
+                raise ValueError(f"Empty argument in: {text}")
+
+            args.append(arg)
+            current = []
+
+        else:
+            current.append(ch)
+
+    if in_string:
+        raise ValueError(f"Unterminated string literal in: {text}")
+
+    if depth != 0:
+        raise ValueError(f"Unbalanced brackets in: {text}")
+
+    # Add final argument
+    arg = "".join(current).strip()
+
+    if not arg:
+        raise ValueError(f"Empty final argument in: {text}")
+
+    args.append(arg)
+
+    return args
+
+def parse_llmquery2(text):
+    """
+    Parse an LLMQuery call into its arguments.
+
+    Example:
+        LLMQuery(a, b, foo(x, y), "question, here")
+
+    Returns:
+        ["a", "b", "foo(x, y)", '"question, here"']
+    """
+    text = text.strip()
+
+    if not text.startswith("LLMQuery(") or not text.endswith(")"):
+        raise ValueError(f"Invalid LLMQuery expression: {text}")
+
+    body = text[len("LLMQuery("):-1]
+
+    args = []
+    current = []
+
+    depth = 0
+    in_string = False
+    escape = False
+
+    for ch in body:
+        # Inside a string literal
+        if in_string:
+            current.append(ch)
+
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+
+            continue
+
+        # Start of a string literal
+        if ch == '"':
+            in_string = True
+            current.append(ch)
+
+        # Nested expression
+        elif ch in "([{":
+            depth += 1
+            current.append(ch)
+
+        elif ch in ")]}":
+            depth -= 1
+
+            if depth < 0:
+                raise ValueError(f"Unbalanced brackets in: {text}")
+
+            current.append(ch)
+
+        # Argument separator
+        elif ch == "," and depth == 0:
+            arg = "".join(current).strip()
+
+            if not arg:
+                raise ValueError(f"Empty argument in: {text}")
+
+            args.append(arg)
+            current = []
+
+        else:
+            current.append(ch)
+
+    if in_string:
+        raise ValueError(f"Unterminated string literal in: {text}")
+
+    if depth != 0:
+        raise ValueError(f"Unbalanced brackets in: {text}")
+
+    # Add final argument
+    arg = "".join(current).strip()
+
+    if not arg:
+        raise ValueError(f"Empty final argument in: {text}")
+
+    args.append(arg)
+
+    return args
+
+
 start_time = time.time()
 if len(sys.argv) < 4:
     print("usage: python script.py <query.ql>")
     sys.exit(1)
 
-group = sys.argv[1]
-action = sys.argv[2]   
-query_file = sys.argv[3] 
-rest = sys.argv[4:]
+#group = sys.argv[1]
+#action = sys.argv[2]   
+#query_file = sys.argv[3] 
+#rest = sys.argv[4:]
+parser = argparse.ArgumentParser()
+parser.add_argument("--database", required=True)
+parser.add_argument("--query", required=True)
+cmd_args = parser.parse_args()
 
-code = read_query_file(query_file)
+
+code = read_query_file(cmd_args.query)
 CodeQL = Language(tree_sitter_ql.language())
 parser = Parser(language=CodeQL)
 vargen = BoolVarGen()
@@ -464,121 +878,432 @@ formula = qp.parse_where_condition(qp.where_root, vargen)
 sf = SatFormula(formula)
 llm = Oracle()
 
-#print(f"[-] Original Query:", file=sys.stderr)
-#print(f"{code.decode('utf8')}", file=sys.stderr)
 print(f"[-] SAT Formula: {formula}", file=sys.stderr)
 
+
+# ------------------------------------------------------------------
+# Prepare the formula and identify LLMQuery atoms
+# ------------------------------------------------------------------
 new_formula = sf.push_nots()
-sf.set_new_formula(new_formula)
+sf.set_formula(new_formula)
+
 select_items = qp.extract_select_items()
 variables_to_remove = []
 
-mapping = {}; args = {}; descs = {}; oracle_info = {}
-pattern = re.compile(r'LLMQuery\(\s*([^,]+)\s*,\s*"(.*)"\)')
+mapping = {}
+args = {}
+source_indices = {}
+oracle_info = {}
 
-print(f"[-] Var Mapping:", file=sys.stderr)
-for v, n in vargen.map.items():
-    text = code[n.start_byte:n.end_byte].decode("utf8")
-    print(f"-------------| {RED}{v} := {text}{RESET}", file=sys.stderr)
-    mapping[v] = text
-    if "LLMQuery" in text: 
-        variables_to_remove.append(v)
-        m = pattern.search(text)
-        if not m: continue
-        args[v] = m.group(1)
-        descs[v] = m.group(2)
+print("[-] Var Mapping:", file=sys.stderr)
 
-base_args_objects = {}
-for k, v in args.items():
-    base_args_objects[k] = v
+for var, node in vargen.mapping.items():
+    text = code[node.start_byte:node.end_byte].decode("utf-8")
 
-tree = ast.parse(new_formula, mode='eval').body
+    print(
+        f"-------------| {RED}{var} := {text}{RESET}",
+        file=sys.stderr,
+    )
+
+    mapping[var] = text
+
+    if "LLMQuery" not in text:
+        continue
+
+    variables_to_remove.append(var)
+
+    llm_args = parse_llmquery(text)
+    print("args = ", llm_args)
+    source_indices[var] = [
+        i
+        for i, arg in enumerate(llm_args)
+        if arg.startswith("source(")
+    ]
+    args[var] = llm_args
+    #print("source_indices=", source_indices)
+
+
+base_args_objects = {
+    var: values
+    for var, values in args.items()
+}
+
+print(base_args_objects)
+
+# ------------------------------------------------------------------
+# Convert the formula to DNF
+# ------------------------------------------------------------------
+
+tree = ast.parse(new_formula, mode="eval").body
 new_sat = sf.ast_to_sympy(tree)
+
+print(
+    f"[-] Formula: {new_sat}",
+    file=sys.stderr,
+)
+
 dnf_expr = sf.sat_to_dnf(new_sat)
-print(f"[-] DNF Formula: {dnf_expr}", file=sys.stderr)
 
-V = {sympify(v) for v in variables_to_remove}
-clauses_with_K, clauses_without_K, W, results = sf.process_dnf_with_K(dnf_expr, V)
-intermediate_queries = len(results)
-dnf_terms = len(clauses_with_K) + len(clauses_without_K)
+print(
+    f"[-] DNF Formula: {dnf_expr}",
+    file=sys.stderr,
+)
 
-for i, elem in enumerate(results):
-   v, c = elem
-   print(f"[-] Processing: {c}", file=sys.stderr)
-   print(f"[-] Oracle Atoms: {v}", file=sys.stderr)
-   formula_symbols = set(c.free_symbols)
-   new_formula = sf.sympy_to_and_or_not(c)
-   tree = ast.parse(new_formula, mode='eval').body
-   new_tree = tree
-   for var in v:
-       formula_symbols.remove(var)
-       new_tree = sf.remove_var_ast(new_tree, str(var))
-   new_formula_str = sf.ast_to_str(new_tree)
-   print(f"[-] Evaluating: {new_formula_str}", file=sys.stderr)
 
-   new_query = recover_query(new_formula_str, mapping)
-   new_file = f"{query_file.split('.ql')[0]}_new_{i}.ql"
-      
-   known = formula_symbols & oracle_info.keys()
+# ------------------------------------------------------------------
+# Determine which DNF clauses contain LLMQuery atoms
+# ------------------------------------------------------------------
 
-   with open(new_file, "w") as f:
-       f.write('import java\n')
-       if known:
-           f.write('// required predicates must be defined here\n')
-           for var in known:
-               if var == v: exit(0)
-               satisfying_elements = ",".join(json.dumps(elem, ensure_ascii=False) for elem in oracle_info[var])
-               if satisfying_elements != "":
-                   f.write(f'predicate target_predicate_{str(var)}(string arg)')
-                   f.write('{'); f.write(f'arg in [{satisfying_elements}]'); f.write('}\n')
-                   new_query = new_query.replace(mapping[str(var)], f'target_predicate_{str(var)}({base_args_objects[str(var)]})')
-               else: 
-                   new_query = new_query.replace(mapping[str(var)], f'(1 != 1)')
-       f.write(qp.from_clause.decode("utf8") + '\n')
-       new_query = new_query.replace("\\", "\\\\")
-       if new_query != "": f.write(f'where {new_query}\n')
-       s = ','.join(f'{args[str(var)]} as target_{str(var)}' for var in v)
-       f.write(f'select {s}')
+oracle_variables = {
+    sympify(var)
+    for var in variables_to_remove
+}
+ordered_clauses = sf.process_dnf_with_K(dnf_expr, oracle_variables)
+intermediate_queries = 0
+dnf_terms = len(ordered_clauses)
 
-   cmd = f"codeql {group} {action} {new_file} " + " ".join(f"{option}" for option in rest if not option.startswith("--output=")) + " --output=tmp.bqrs"
-   print(f"[-] Int. Query: {cmd}", file=sys.stderr)
 
-   subprocess.run(["bash", "-lc", cmd], check=True, env=os.environ)
-   cmd = f"codeql bqrs decode --output=tmp.csv --format=csv tmp.bqrs"   
-   subprocess.run(["bash", "-lc", cmd], check=True, env=os.environ)
-   df = pd.read_csv("tmp.csv")
-   for var in v:
-       target_var = df[f"target_{var}"].dropna().unique().tolist()
-       target_var = sorted(target_var, key=lambda x: str(x))
-       ans_values = llm.submit_oracle_queries(descs[str(var)], target_var)
-       if var in oracle_info.keys():
-           oracle_info[var] = oracle_info[var] + ans_values
-       else: oracle_info[var] = ans_values
+# ------------------------------------------------------------------
+# Evaluate each intermediate formula
+# ------------------------------------------------------------------
 
-known = sympify(new_sat).free_symbols & oracle_info.keys()
-final_query = code.decode("utf8")
-new_file = f"{query_file.split('.ql')[0]}_final_optimized.ql"
+previous_clauses = []
+materialized_atoms = set()
+# O_q in Algorithm 1: regions in which q has already been submitted to
+# the oracle (or was excluded by an earlier pruning constraint).
+oracle_regions = {q: [] for q in oracle_variables}
 
-with open(new_file, "w") as f:
-    if known:
-        f.write('// required predicates must be defined here\n')
-        for var in known:
-            satisfying_elements = ",".join(json.dumps(elem, ensure_ascii=False) for elem in oracle_info[var])
-            if satisfying_elements != "":
-                f.write(f'predicate target_predicate_{str(var)}(string arg)')
-                f.write('{'); f.write(f'arg in [{satisfying_elements}]'); f.write('}\n')
-                final_query = final_query.replace(mapping[str(var)], f'target_predicate_{str(var)}({base_args_objects[str(var)]})')
+for index, (C_i, oracle_atoms) in enumerate(ordered_clauses):
+    # A zero-atom DNF term needs no intermediate query, but it must still
+    # participate in Delta for every later term.
+    if not oracle_atoms:
+        previous_clauses.append(C_i)
+        continue
+
+    print(f"[-] Processing: {C_i}", file=sys.stderr)
+    print(f"[-] Oracle Atoms: {oracle_atoms}", file=sys.stderr)
+
+    oracle_atoms_sorted = sorted(
+        oracle_atoms,
+        key=lambda p: (
+            p not in oracle_info,
+            str(p),
+        )
+    )
+
+    # Oracle predicates that have already been materialized
+    visited_oracle_vars = set()
+    for oracle_var in oracle_atoms_sorted:
+        print(
+            f"[-] Let's materialize atom: {oracle_var}",
+            file=sys.stderr,
+        )
+
+        # This is D_i AND F_i[V_i].  Remove unvisited LLM *literals* from
+        # only the current DNF term, so occurrences in Delta are never
+        # removed.  In particular, removing ``not q`` is not the same as
+        # substituting q = true.
+        unvisited_atoms = oracle_atoms - visited_oracle_vars
+        current_context = sf.remove_llm_literals(C_i, unvisited_atoms)
+
+        # Delta excludes (1) all preceding DNF terms and (2) every region
+        # in O_q for the atom now being materialized (Algorithm 1, 3(c)B).
+        #exclusions = list(oracle_regions[oracle_var])
+        #if previous_clauses:
+        #    exclusions.insert(0, Or(*previous_clauses))
+        #relevant_formula = And(
+        #    current_context,
+        #    *(Not(exclusion) for exclusion in exclusions),
+        #)
+
+
+        # Delta excludes (1) every preceding DNF term and (2) every region
+        # in O_q for the atom now being materialized (Algorithm 1, 3(c)B).
+        exclusions = [
+            *previous_clauses,
+            *oracle_regions[oracle_var],
+        ]
+
+        relevant_formula = And(
+            current_context,
+            *(Not(exclusion) for exclusion in exclusions),
+        )
+
+
+        # Render materialized atoms with distinct placeholders.  This is
+        # essential when the atom currently being materialized also appears
+        # in a preceding term or an O_q region.
+        placeholder_map = {
+            atom: Symbol(f"materialized_{atom}")
+            for atom in materialized_atoms
+        }
+        rendered_formula = relevant_formula.xreplace(placeholder_map)
+        rendered_string = sf.sympy_to_and_or_not(rendered_formula)
+        # Keep CodeQL constants in CodeQL syntax: ast_to_str renders a
+        # Boolean True as ``(1 = 1)`` rather than Python's ``True``.
+        rendered_tree = ast.parse(rendered_string, mode="eval").body
+        reduced_formula = sf.ast_to_str(rendered_tree)
+
+        print(
+            f"[-] Evaluating: {reduced_formula}",
+            file=sys.stderr,
+        )
+
+        # Restore ordinary CodeQL expressions.  LLM atoms in this formula
+        # are placeholders and are replaced with their materializations below.
+        new_query = recover_query(reduced_formula, mapping)
+        new_file = (
+            f"{interm}/{cmd_args.query.split('/')[-1].split('.ql')[0]}_new_{index}.ql"
+        )
+
+        # --------------------------------------------------------------
+        # Generate the intermediate CodeQL query
+        # --------------------------------------------------------------
+
+        f = open(new_file, "w")
+        f.write("import java\n")
+
+        #if visited_oracle_vars:
+
+        f.write("// required predicates must be defined here\n")
+
+        for var in sorted(materialized_atoms, key=str):
+            print(f"Let's decide about {var}")
+            satisfying_elements = ",".join(
+                json.dumps(element, ensure_ascii=False)
+                for element in oracle_info[var]
+            )
+
+            if satisfying_elements:
+                f.write(
+                    f"predicate target_predicate_{var}(string arg)"
+                )
+                f.write("{")
+                f.write(
+                    f"arg in [{satisfying_elements}]"
+                )
+                f.write("}\n")
+
+                base_arg = " + \"::\" + ".join(
+                    arg[len("source("):-1] if arg.startswith("source(") and arg.endswith(")") else arg
+                    for arg in base_args_objects[str(var)]
+                )
+
+                new_query = re.sub(
+                    rf"\bmaterialized_{re.escape(str(var))}\b",
+                    f"target_predicate_{var}({base_arg})",
+                    new_query,
+                )
+
             else:
-                final_query = final_query.replace(mapping[str(var)], f'(1 != 1)')
+                new_query = re.sub(
+                    rf"\bmaterialized_{re.escape(str(var))}\b",
+                    "(1 != 1)",
+                    new_query,
+                )
+
+        f.write(qp.from_clause.decode("utf-8"))
+        f.write("\n")
+
+        new_query = new_query.replace("\\", "\\\\")
+
+        if new_query:
+            f.write(f"where {new_query}\n")
+
+        # Return the arguments required by the Oracle.
+        collection = " + \"::\" + ".join(
+            arg[len("source("):-1] if arg.startswith("source(") and arg.endswith(")") else arg
+            for arg in base_args_objects[str(oracle_var)]
+        )
+
+        select_clause = f"{collection} as target_{oracle_var}" 
+
+        f.write(f"select {select_clause}"); f.close()
+
+        # --------------------------------------------------------------
+        # Execute the intermediate CodeQL query
+        # --------------------------------------------------------------
+
+        cmd = (
+            f"codeql query run {new_file} --database={cmd_args.database} --output=tmp.bqrs"
+            #+ " ".join(
+            #    option
+            #    for option in rest
+            #    if not option.startswith("--output=")
+            #)
+        )
+
+        print(
+            f"[-] Int. Query: {cmd}",
+            file=sys.stderr,
+        )
+
+        subprocess.run(
+            ["bash", "-lc", cmd],
+            check=True,
+            env=os.environ,
+        )
+
+        decode_cmd = (
+            "codeql bqrs decode "
+            "--output=tmp.csv "
+            "--format=csv "
+            "tmp.bqrs"
+        )
+
+        subprocess.run(
+            ["bash", "-lc", decode_cmd],
+            check=True,
+            env=os.environ,
+        )
+
+        df = pd.read_csv("tmp.csv")
+
+
+        # --------------------------------------------------------------
+        # Materialize the Oracle atoms returned by this query
+        # --------------------------------------------------------------
+
+        target_values = (
+            df[f"target_{oracle_var}"]
+            .dropna()
+            .unique()
+            .tolist()
+        )
+        print(len(target_values))
+        if len(target_values) > 80: 
+            exit(1)
+        target_values = sorted(
+            target_values,
+            key=str,
+        )
+
+        satisfying_values = llm.submit_oracle_queries(
+            target_values, oracle_var
+        )
+
+        oracle_info.setdefault(oracle_var, []).extend(
+            satisfying_values
+        )
+
+        # Record D_i AND F_i[V_i] in O_q before q is added to V_i, exactly
+        # as the relevant query for q was formed above.
+        oracle_regions[oracle_var].append(current_context)
+        visited_oracle_vars.add(oracle_var)
+        materialized_atoms.add(oracle_var)
+        intermediate_queries += 1
+        print("Let's add to visited: ", oracle_var)
+
+    previous_clauses.append(C_i)
+
+# ------------------------------------------------------------------
+# Construct the final optimized query
+# ------------------------------------------------------------------
+
+visited_oracle_vars = (
+    sympify(new_sat).free_symbols
+    & oracle_info.keys()
+)
+
+final_query = code.decode("utf-8")
+
+final_file = (
+    #f"final-q/{query_file.split('.ql')[0]}_final.ql"
+    f"{final}/{cmd_args.query.split('/')[-1].split('.ql')[0]}_{cmd_args.database.split('/')[-1]}_final.ql"
+)
+print(final_file)
+with open(final_file, "w") as f:
+
+    #if visited_oracle_vars:
+    f.write(
+        "// required predicates must be defined here\n"
+    )
+
+    for var in visited_oracle_vars:
+
+        satisfying_elements = ",".join(
+            json.dumps(element, ensure_ascii=False)
+            for element in oracle_info[var]
+        )
+
+        if satisfying_elements:
+
+            f.write(
+                f"predicate target_predicate_{var}(string arg)"
+            )
+            f.write("{")
+            f.write(
+                f"arg in [{satisfying_elements}]"
+            )
+            f.write("}\n")
+
+            base_arg = " + \"::\" + ".join(
+                arg[len("source("):-1] if arg.startswith("source(") and arg.endswith(")") else arg
+                for arg in base_args_objects[str(var)]
+            )
+
+            final_query = final_query.replace(
+                mapping[str(var)],
+                f"target_predicate_{var}({base_arg})",
+            )
+
+        else:
+            final_query = final_query.replace(
+                mapping[str(var)],
+                "(1 != 1)",
+            )
+
+    for var in { key for key, value in mapping.items()
+                 if "LLMQuery" in value} - {str(var) for var in visited_oracle_vars}:
+
+        final_query = final_query.replace(
+            mapping[var],
+            "(1 != 1)",
+        )
+
     f.write(final_query)
 
-cmd = f"codeql {group} {action} {new_file} " + " ".join(f"{option}" for option in rest if not option.startswith("--output=")) + " --output=tmp.bqrs"
-print(f"[-] Final Query: {cmd}", file=sys.stderr)
 
-subprocess.run(["bash", "-lc", cmd], check=True, env=os.environ)
-cmd = f"codeql bqrs decode --output=tmp.csv --format=csv tmp.bqrs"
+# ------------------------------------------------------------------
+# Execute the final optimized query
+# ------------------------------------------------------------------
 
-subprocess.run(["bash", "-lc", cmd], check=True, env=os.environ)
+cmd = (
+    f"codeql query run {final_file} --database={cmd_args.database} --output=tmp.bqrs"
+    #f"codeql {group} {action} {final_file} "
+    #+ " ".join(
+    #    option
+    #    for option in rest
+    #    if not option.startswith("--output=")
+    #)
+    #+ f" --database={args.database}"
+    #+ " --output=tmp.bqrs"
+)
+
+print(
+    f"[-] Final Query: {cmd}",
+    file=sys.stderr,
+)
+
+subprocess.run(
+    ["bash", "-lc", cmd],
+    check=True,
+    env=os.environ,
+)
+
+decode_cmd = (
+    "codeql bqrs decode "
+    "--output=tmp.csv "
+    "--format=csv "
+    "tmp.bqrs"
+)
+
+subprocess.run(
+    ["bash", "-lc", decode_cmd],
+    check=True,
+    env=os.environ,
+)
+
 df = pd.read_csv("tmp.csv")
 
 print(f"{GREEN}[+] Int. Queries: {intermediate_queries}{RESET}")
@@ -586,7 +1311,6 @@ print(f"{GREEN}[+] DNF Terms: {dnf_terms}{RESET}")
 print(f"{GREEN}[+] Output Tokens: {llm.oracle_output_tokens}{RESET}")
 print(f"{GREEN}[+] Input Tokens: {llm.oracle_input_tokens}{RESET}")
 print(f"{GREEN}[+] Oracle Calls: {llm.oracle_calls}{RESET}")
-print(f"{GREEN}[+] Oracle Chunk Calls: {llm.oracle_chunk_calls}{RESET}")
 print(f"{GREEN}[+] Oracle Time: {llm.oracle_time:.2f}{RESET}")
 print(f"{GREEN}[+] Output Tuples: {len(df)}{RESET}")
 print(f"{GREEN}[+] Total Time: {time.time() - start_time:.2f}{RESET}")
