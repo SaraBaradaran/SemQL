@@ -5,6 +5,8 @@
 </div>
 <!-- An extension of CodeQL language -->
 
+#### An updated version of SemQL, incorporating the latest language extensions and query evaluation optimizations, is available in the `STTT` branch.
+
 For more information, see our SOAP 2026 paper ["LLM-Integrated Declarative Program Analysis"](https://doi.org/10.1145/3814987.3814993).
 If you use this tool in your research, please cite our paper as follows:
 ```
