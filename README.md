@@ -13,16 +13,14 @@ export PATH=$PATH:/path/to/codeql
 codeql resolve qlpacks
 ```
 
-To run the benchmakrs on the subject program which we used in our evaluation, you simply need to do the following steps
-#### Download the Subject Codebases From Google Drive
-```
-https://drive.google.com/drive/folders/1ydc8Pmjb6uU8nygd6BXzDQGLCTCAZmr5?usp=sharing
-```
-#### Create The Dataset of Facts
+To run the benchmakrs on the subject program which we used in our evaluation, you simply need to do the following steps:
+
+###### Download the subject codebases from Google Drive at [link](https://drive.google.com/drive/folders/1ydc8Pmjb6uU8nygd6BXzDQGLCTCAZmr5?usp=sharing)
+###### Create the dataset of facts
 ```
 codeql database create databases/example-database --language=java --source-root=path/to/codebase --build-mode=none
 ```
-#### Run An Example SemQL Query
+###### Run an Example SemQL query
 
 ```
 python3 SemQL3.py --query ./queries/assertion.ql --database databases/example-database
